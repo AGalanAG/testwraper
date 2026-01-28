@@ -1,0 +1,15 @@
+{
+  "name": "mercadolibre-scraper",
+  "version": "1.0.0",
+  "description": "Scraper simple para obtener precios de productos en Mercado Libre México",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "keywords": ["puppeteer", "scraper", "mercadolibre"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "puppeteer": "^24.15.0"
+  }
+}
