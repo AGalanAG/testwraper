@@ -7,35 +7,60 @@ const puppeteer = require('puppeteer');
  */
 async function buscarProducto(producto) {
   const browser = await puppeteer.launch({
-    headless: false, // Cambia a true si no quieres ver el navegador
-    defaultViewport: null,
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+      '--disable-dev-shm-usage'
+    ]
   });
 
   try {
     const page = await browser.newPage();
     
-    // Navegar directamente a la búsqueda en Mercado Libre México
-    console.log('Navegando a Mercado Libre México...');
-    const searchUrl = `https://listado.mercadolibre.com.mx/${encodeURIComponent(producto)}`;
-    await page.goto(searchUrl, {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000
+    // Configurar User-Agent para parecer un navegador real
+    await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    
+    // Ocultar que estamos usando Puppeteer
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => false,
+      });
     });
-
-    console.log(`Buscando: ${producto}...`);
     
-    // Esperar a que carguen los resultados con diferentes posibles selectores
-    await page.waitForFunction(() => {
-      return document.querySelectorAll('.ui-search-layout__item').length > 0 ||
-             document.querySelectorAll('.ui-search-result').length > 0;
-    }, { timeout: 15000 });
+    const searchUrl = `https://listado.mercadolibre.com.mx/${encodeURIComponent(producto)}`;
     
-    // Esperar un poco más para asegurar que todos los elementos estén cargados
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    try {
+      await page.goto(searchUrl, {
+        waitUntil: 'domcontentloaded',
+        timeout: 45000
+      });
+    } catch (navError) {
+      // Si falla la navegación, intentar continuar de todas formas
+      console.error('Advertencia navegación:', navError.message);
+    }
 
-    // Extraer los precios
-    console.log('Extrayendo precios...');
-    const precios = await page.evaluate(() => {
+    // Esperar con timeout más flexible
+    try {
+      await page.waitForSelector('.ui-search-layout__item, .ui-search-result', { 
+        timeout: 20000 
+      });
+    } catch (waitError) {
+      // Verificar si hay elementos de todas formas
+      const elementosExisten = await page.evaluate(() => {
+        return document.querySelectorAll('.ui-search-layout__item').length > 0 ||
+               document.querySelectorAll('.ui-search-result').length > 0;
+      });
+      
+      if (!elementosExisten) {
+        throw new Error('No se encontraron resultados de búsqueda. Posible bloqueo o problema de red.');
+      }
+    }
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
+    const precios = await page.evaluate((productoBuscado) => {
       // Intentar con diferentes selectores
       let elementos = document.querySelectorAll('.ui-search-layout__item');
       if (elementos.length === 0) {
@@ -44,7 +69,7 @@ async function buscarProducto(producto) {
       
       const preciosArray = [];
       
-      for (let i = 0; i < Math.min(elementos.length, 10); i++) {
+      for (let i = 0; i < Math.min(elementos.length, 15); i++) {
         const elemento = elementos[i];
         
         // Buscar el precio dentro del elemento (varios posibles selectores)
@@ -96,35 +121,71 @@ async function buscarProducto(producto) {
         }
       }
       
-      return preciosArray;
-    });
+      // Clasificar: primero los que tienen la palabra exacta, luego el resto
+      const palabrasBuscadas = productoBuscado.toLowerCase().split(/\s+/);
+      
+      const conCoincidenciaExacta = preciosArray.filter(item => {
+        const tituloLower = item.titulo.toLowerCase();
+        return palabrasBuscadas.every(palabra => {
+          // Buscar la palabra completa usando word boundary
+          const regex = new RegExp(`\\b${palabra}\\b`, 'i');
+          return regex.test(tituloLower);
+        });
+      });
+      
+      const sinCoincidenciaExacta = preciosArray.filter(item => {
+        const tituloLower = item.titulo.toLowerCase();
+        return !palabrasBuscadas.every(palabra => {
+          const regex = new RegExp(`\\b${palabra}\\b`, 'i');
+          return regex.test(tituloLower);
+        });
+      });
+      
+      // Reordenar posiciones
+      const resultadosOrdenados = [...conCoincidenciaExacta, ...sinCoincidenciaExacta];
+      resultadosOrdenados.forEach((item, index) => {
+        item.posicion = index + 1;
+        item.coincidenciaExacta = index < conCoincidenciaExacta.length;
+      });
+      
+      return resultadosOrdenados;
+    }, producto);
 
-    console.log('\n=== RESULTADOS ===\n');
-    precios.forEach(item => {
-      console.log(`${item.posicion}. ${item.titulo}`);
-      console.log(`   Precio: $${item.precio} MXN`);
-      console.log(`   Link: ${item.link}\n`);
-    });
+    const exactas = precios.filter(p => p.coincidenciaExacta).length;
+    const parciales = precios.length - exactas;
 
-    return precios;
+    return {
+      exito: true,
+      producto: producto,
+      totalResultados: precios.length,
+      coincidenciasExactas: exactas,
+      coincidenciasParciales: parciales,
+      resultados: precios
+    };
 
   } catch (error) {
-    console.error('Error durante el scraping:', error.message);
-    throw error;
+    return {
+      exito: false,
+      error: error.message,
+      producto: producto
+    };
   } finally {
     await browser.close();
   }
 }
 
-// Ejecutar el scraper
-const productoABuscar = process.argv[2] || 'laptop';
-console.log(`\nIniciando búsqueda de: "${productoABuscar}"\n`);
+module.exports = buscarProducto;
 
-buscarProducto(productoABuscar)
-  .then(resultados => {
-    console.log(`\n✓ Se encontraron ${resultados.length} productos`);
-  })
-  .catch(error => {
-    console.error('Error:', error);
-    process.exit(1);
-  });
+// Permitir ejecución directa desde CLI si es necesario
+if (require.main === module) {
+  const productoABuscar = process.argv[2] || 'laptop';
+  buscarProducto(productoABuscar)
+    .then(resultado => {
+      console.log(JSON.stringify(resultado, null, 2));
+      process.exit(resultado.exito ? 0 : 1);
+    })
+    .catch(error => {
+      console.error(JSON.stringify({ exito: false, error: error.message }));
+      process.exit(1);
+    });
+}
